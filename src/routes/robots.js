@@ -8,7 +8,7 @@ const pool = require('../db/pool');
 router.get('/', async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT id, name, last_ip, is_online, last_seen, created_at
+      `SELECT id, name, last_ip, is_online, last_seen, created_at, switch_to_ap
        FROM robots
        ORDER BY created_at DESC`
     );
@@ -25,7 +25,7 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT id, name, last_ip, is_online, last_seen, created_at
+      `SELECT id, name, last_ip, is_online, last_seen, created_at, switch_to_ap
        FROM robots WHERE id = $1`,
       [req.params.id]
     );
@@ -102,6 +102,28 @@ router.put('/:id', async (req, res) => {
     res.json({ success: true, data: rows[0] });
   } catch (err) {
     console.error('PUT /robots/:id error:', err.message);
+    res.status(500).json({ error: 'Database error', message: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────
+// PUT /api/robots/:id/ap_mode — Command robot to switch to AP mode
+// ─────────────────────────────────────────────
+router.put('/:id/ap_mode', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `UPDATE robots
+       SET switch_to_ap = TRUE
+       WHERE id = $1
+       RETURNING *`,
+      [req.params.id]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Not found', message: 'Robot not found' });
+    }
+    res.json({ success: true, data: rows[0] });
+  } catch (err) {
+    console.error('PUT /robots/:id/ap_mode error:', err.message);
     res.status(500).json({ error: 'Database error', message: err.message });
   }
 });
