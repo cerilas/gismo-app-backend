@@ -113,6 +113,7 @@ async function sendCommand(robotId, command) {
     throw new Error('Robot is not connected');
   }
 
+  console.log(`Command ${normalizedCommand} sent to robot ${normalizedRobotId}`);
   return rows[0];
 }
 
@@ -217,11 +218,13 @@ function attachWebSocketServer(server) {
 
       robotClients.set(robotId, ws);
       await markRobotOnline(robotId, true);
+      console.log(`Robot connected: ${robotId}`);
       safeSend(ws, { type: 'connected', role: 'robot', robot_id: robotId });
 
       ws.on('close', async () => {
         if (robotClients.get(robotId) === ws) {
           robotClients.delete(robotId);
+          console.log(`Robot disconnected: ${robotId}`);
           await markRobotOnline(robotId, false).catch((err) => {
             console.error('Robot offline update failed:', err.message);
           });
@@ -260,6 +263,7 @@ function attachWebSocketServer(server) {
           break;
         }
         case 'command': {
+          console.log(`Command request from app: robot=${message.robot_id} command=${message.command}`);
           const command = await sendCommand(message.robot_id, message.command);
           safeSend(ws, { type: 'command_ack', request_id: message.request_id, command });
           break;
