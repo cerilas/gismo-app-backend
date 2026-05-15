@@ -21,7 +21,7 @@ function normalizeRobot(row) {
     id: row.id,
     name: row.name,
     last_ip: row.last_ip,
-    is_online: row.is_online,
+    is_online: robotClients.has(row.id),
     last_seen: row.last_seen,
     created_at: row.created_at,
   };
