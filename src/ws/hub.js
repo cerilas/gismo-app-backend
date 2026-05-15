@@ -186,7 +186,7 @@ function attachWebSocketServer(server) {
       client.isAlive = false;
       client.ping();
     }
-  }, 10000);
+  }, 2000);
 
   wss.on('close', () => {
     clearInterval(heartbeatInterval);
