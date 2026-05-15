@@ -1,7 +1,7 @@
 const { WebSocket, WebSocketServer } = require('ws');
 const pool = require('../db/pool');
 
-const VALID_COMMANDS = new Set(['F', 'B', 'L', 'R', 'S', 'RESET_WIFI']);
+const VALID_COMMANDS = new Set(['F', 'B', 'L', 'R', 'S', 'A']);
 const appClients = new Set();
 const robotClients = new Map();
 const robotLastSeenAt = new Map();
