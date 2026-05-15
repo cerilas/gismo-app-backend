@@ -5,6 +5,10 @@ const VALID_COMMANDS = new Set(['F', 'B', 'L', 'R', 'S']);
 const appClients = new Set();
 const robotClients = new Map();
 
+function normalizeRobotId(robotId) {
+  return robotId ? String(robotId).toLowerCase() : robotId;
+}
+
 function safeSend(ws, message) {
   if (ws.readyState !== WebSocket.OPEN) return;
   ws.send(JSON.stringify(message));
@@ -17,11 +21,12 @@ function broadcastToApps(message) {
 }
 
 function normalizeRobot(row) {
+  const robotId = normalizeRobotId(row.id);
   return {
-    id: row.id,
+    id: robotId,
     name: row.name,
     last_ip: row.last_ip,
-    is_online: robotClients.has(row.id),
+    is_online: robotClients.has(robotId),
     last_seen: row.last_seen,
     created_at: row.created_at,
   };
@@ -37,11 +42,12 @@ async function fetchRobots() {
 }
 
 async function fetchRobot(robotId) {
+  const normalizedRobotId = normalizeRobotId(robotId);
   const { rows } = await pool.query(
     `SELECT id, name, last_ip, is_online, last_seen, created_at
      FROM robots
      WHERE id = $1`,
-    [robotId]
+    [normalizedRobotId]
   );
   return rows[0] ? normalizeRobot(rows[0]) : null;
 }
@@ -53,6 +59,7 @@ async function broadcastRobot(robotId) {
 }
 
 async function markRobotOnline(robotId, isOnline, lastIp = null) {
+  const normalizedRobotId = normalizeRobotId(robotId);
   const { rows } = await pool.query(
     `UPDATE robots
      SET
@@ -61,7 +68,7 @@ async function markRobotOnline(robotId, isOnline, lastIp = null) {
        last_seen = NOW()
      WHERE id = $1
      RETURNING id, name, last_ip, is_online, last_seen, created_at`,
-    [robotId, isOnline, lastIp]
+    [normalizedRobotId, isOnline, lastIp]
   );
 
   if (rows[0]) {
@@ -70,6 +77,7 @@ async function markRobotOnline(robotId, isOnline, lastIp = null) {
 }
 
 async function sendCommand(robotId, command) {
+  const normalizedRobotId = normalizeRobotId(robotId);
   const normalizedCommand = command.toUpperCase();
   if (!VALID_COMMANDS.has(normalizedCommand)) {
     throw new Error(`command must be one of: ${[...VALID_COMMANDS].join(', ')}`);
@@ -78,17 +86,17 @@ async function sendCommand(robotId, command) {
   await pool.query(
     `DELETE FROM commands
      WHERE robot_id = $1 AND executed = FALSE`,
-    [robotId]
+    [normalizedRobotId]
   );
 
   const { rows } = await pool.query(
     `INSERT INTO commands (robot_id, command)
      VALUES ($1, $2)
      RETURNING *`,
-    [robotId, normalizedCommand]
+    [normalizedRobotId, normalizedCommand]
   );
 
-  const robotSocket = robotClients.get(robotId);
+  const robotSocket = robotClients.get(normalizedRobotId);
   if (robotSocket) {
     safeSend(robotSocket, {
       type: 'command',
@@ -106,13 +114,14 @@ async function registerRobot(name, id = null) {
     throw new Error('name is required');
   }
 
+  const normalizedRobotId = normalizeRobotId(id);
   const { rows } = id
     ? await pool.query(
         `INSERT INTO robots (id, name)
          VALUES ($1, $2)
          ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name
          RETURNING id, name, last_ip, is_online, last_seen, created_at`,
-        [id, name.trim()]
+        [normalizedRobotId, name.trim()]
       )
     : await pool.query(
         `INSERT INTO robots (name)
@@ -127,21 +136,22 @@ async function registerRobot(name, id = null) {
 }
 
 async function deleteRobot(robotId) {
+  const normalizedRobotId = normalizeRobotId(robotId);
   const { rowCount } = await pool.query(
     'DELETE FROM robots WHERE id = $1',
-    [robotId]
+    [normalizedRobotId]
   );
 
   if (rowCount === 0) {
     throw new Error('Robot not found');
   }
 
-  const robotSocket = robotClients.get(robotId);
+  const robotSocket = robotClients.get(normalizedRobotId);
   if (robotSocket) {
     robotSocket.close(1000, 'robot deleted');
   }
 
-  broadcastToApps({ type: 'robot_deleted', robot_id: robotId });
+  broadcastToApps({ type: 'robot_deleted', robot_id: normalizedRobotId });
 }
 
 function parseMessage(raw) {
@@ -170,7 +180,7 @@ function attachWebSocketServer(server) {
     }
 
     const role = url.searchParams.get('role') || 'app';
-    const robotId = url.searchParams.get('robot_id');
+    const robotId = normalizeRobotId(url.searchParams.get('robot_id'));
 
     if (role === 'robot') {
       if (!robotId) {
@@ -217,8 +227,9 @@ function attachWebSocketServer(server) {
           break;
         }
         case 'delete_robot': {
-          await deleteRobot(message.robot_id);
-          safeSend(ws, { type: 'robot_deleted_ack', request_id: message.request_id, robot_id: message.robot_id });
+          const deletedRobotId = normalizeRobotId(message.robot_id);
+          await deleteRobot(deletedRobotId);
+          safeSend(ws, { type: 'robot_deleted_ack', request_id: message.request_id, robot_id: deletedRobotId });
           break;
         }
         case 'command': {
