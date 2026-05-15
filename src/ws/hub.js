@@ -112,7 +112,7 @@ async function sendCommand(robotId, command) {
     const commandPayload = {
       id: null,
       robot_id: normalizedRobotId,
-      command: normalizedCommand,
+      command: 'RESET_WIFI',
       created_at: new Date().toISOString(),
     };
 
