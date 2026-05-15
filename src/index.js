@@ -1,6 +1,7 @@
 require('dotenv').config();
 
 const express = require('express');
+const http    = require('http');
 const cors    = require('cors');
 const helmet  = require('helmet');
 const rateLimit = require('express-rate-limit');
@@ -9,8 +10,10 @@ const { migrate }       = require('./db/migrate');
 const { requireApiKey } = require('./middleware/auth');
 const robotsRouter      = require('./routes/robots');
 const commandsRouter    = require('./routes/commands');
+const { attachWebSocketServer } = require('./ws/hub');
 
 const app  = express();
+const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 
 // ─────────────────────────────────────────────
@@ -73,8 +76,11 @@ app.use((err, req, res, next) => {
 async function start() {
   try {
     await migrate();           // Run DB migrations on every startup
-    app.listen(PORT, '0.0.0.0', () => {
+    attachWebSocketServer(server);
+
+    server.listen(PORT, '0.0.0.0', () => {
       console.log(`🚀 Gismo API running on port ${PORT}`);
+      console.log('   WebSocket: /ws');
       console.log(`   NODE_ENV: ${process.env.NODE_ENV || 'development'}`);
       console.log(`   Auth: ${process.env.API_KEY ? 'enabled' : 'DISABLED (set API_KEY)'}`);
     });

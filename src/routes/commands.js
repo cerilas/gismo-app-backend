@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../db/pool');
+const { sendCommand } = require('../ws/hub');
 
 // Valid command characters
 const VALID_COMMANDS = new Set(['F', 'B', 'L', 'R', 'S']);
@@ -23,21 +24,8 @@ router.post('/', async (req, res) => {
   }
 
   try {
-    // Auto-cleanup: only the latest command matters for real-time control.
-    await pool.query(
-      `DELETE FROM commands
-       WHERE robot_id = $1 AND executed = FALSE`,
-      [robot_id]
-    );
-
-    const { rows } = await pool.query(
-      `INSERT INTO commands (robot_id, command)
-       VALUES ($1, $2)
-       RETURNING *`,
-      [robot_id, command.toUpperCase()]
-    );
-
-    res.status(201).json({ success: true, data: rows[0] });
+    const data = await sendCommand(robot_id, command);
+    res.status(201).json({ success: true, data });
   } catch (err) {
     console.error('POST /commands error:', err.message);
     // Handle FK violation (robot not found)
