@@ -4,6 +4,8 @@ const pool = require('../db/pool');
 const VALID_COMMANDS = new Set(['F', 'B', 'L', 'R', 'S']);
 const appClients = new Set();
 const robotClients = new Map();
+const robotLastSeenAt = new Map();
+const ROBOT_STALE_AFTER_MS = 5000;
 
 function normalizeRobotId(robotId) {
   return robotId ? String(robotId).toLowerCase() : robotId;
@@ -27,10 +29,27 @@ function normalizeRobot(row) {
     id: robotId,
     name: row.name,
     last_ip: row.last_ip,
-    is_online: robotClients.has(robotId),
+    is_online: isRobotOnline(robotId),
     last_seen: row.last_seen,
     created_at: row.created_at,
   };
+}
+
+function isRobotOnline(robotId) {
+  const normalizedRobotId = normalizeRobotId(robotId);
+  const socket = robotClients.get(normalizedRobotId);
+  const lastSeenAt = robotLastSeenAt.get(normalizedRobotId);
+  return Boolean(
+    socket
+    && socket.readyState === WebSocket.OPEN
+    && lastSeenAt
+    && Date.now() - lastSeenAt <= ROBOT_STALE_AFTER_MS
+  );
+}
+
+function touchRobot(robotId) {
+  const normalizedRobotId = normalizeRobotId(robotId);
+  robotLastSeenAt.set(normalizedRobotId, Date.now());
 }
 
 async function fetchRobots() {
@@ -98,7 +117,7 @@ async function sendCommand(robotId, command) {
   );
 
   const robotSocket = robotClients.get(normalizedRobotId);
-  if (!robotSocket || robotSocket.readyState !== WebSocket.OPEN) {
+  if (!isRobotOnline(normalizedRobotId) || !robotSocket || robotSocket.readyState !== WebSocket.OPEN) {
     throw new Error('Robot is not connected');
   }
 
@@ -187,10 +206,26 @@ function attachWebSocketServer(server) {
       client.isAlive = false;
       client.ping();
     }
+  }, 30000);
+
+  const staleRobotInterval = setInterval(async () => {
+    for (const [robotId, ws] of robotClients.entries()) {
+      if (!isRobotOnline(robotId)) {
+        robotClients.delete(robotId);
+        robotLastSeenAt.delete(robotId);
+        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+          ws.terminate();
+        }
+        await markRobotOnline(robotId, false).catch((err) => {
+          console.error('Robot stale offline update failed:', err.message);
+        });
+      }
+    }
   }, 2000);
 
   wss.on('close', () => {
     clearInterval(heartbeatInterval);
+    clearInterval(staleRobotInterval);
   });
 
   wss.on('connection', async (ws, req) => {
@@ -217,6 +252,7 @@ function attachWebSocketServer(server) {
       }
 
       robotClients.set(robotId, ws);
+      touchRobot(robotId);
       await markRobotOnline(robotId, true);
       console.log(`Robot connected: ${robotId}`);
       safeSend(ws, { type: 'connected', role: 'robot', robot_id: robotId });
@@ -224,6 +260,7 @@ function attachWebSocketServer(server) {
       ws.on('close', async () => {
         if (robotClients.get(robotId) === ws) {
           robotClients.delete(robotId);
+          robotLastSeenAt.delete(robotId);
           console.log(`Robot disconnected: ${robotId}`);
           await markRobotOnline(robotId, false).catch((err) => {
             console.error('Robot offline update failed:', err.message);
@@ -270,6 +307,7 @@ function attachWebSocketServer(server) {
         }
         case 'status': {
           if (role !== 'robot') throw new Error('Only robot clients can send status');
+          touchRobot(robotId);
           await markRobotOnline(robotId, message.is_online !== false, message.last_ip || null);
           break;
         }
