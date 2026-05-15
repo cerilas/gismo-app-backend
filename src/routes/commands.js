@@ -23,11 +23,10 @@ router.post('/', async (req, res) => {
   }
 
   try {
-    // Auto-cleanup: remove old unexecuted commands for this robot before inserting
-    // (keeps the queue clean — only the latest command matters for real-time control)
+    // Auto-cleanup: only the latest command matters for real-time control.
     await pool.query(
       `DELETE FROM commands
-       WHERE robot_id = $1 AND executed = FALSE AND command != 'S'`,
+       WHERE robot_id = $1 AND executed = FALSE`,
       [robot_id]
     );
 
