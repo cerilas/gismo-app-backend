@@ -103,6 +103,32 @@ async function sendCommand(robotId, command) {
     throw new Error(`command must be one of: ${[...VALID_COMMANDS].join(', ')}`);
   }
 
+  const robotSocket = robotClients.get(normalizedRobotId);
+  if (!isRobotOnline(normalizedRobotId) || !robotSocket || robotSocket.readyState !== WebSocket.OPEN) {
+    throw new Error('Robot is not connected');
+  }
+
+  if (normalizedCommand === 'A') {
+    const commandPayload = {
+      id: null,
+      robot_id: normalizedRobotId,
+      command: normalizedCommand,
+      created_at: new Date().toISOString(),
+    };
+
+    const didSendAPCommand = safeSend(robotSocket, {
+      type: 'command',
+      ...commandPayload,
+    });
+
+    if (!didSendAPCommand) {
+      throw new Error('Robot is not connected');
+    }
+
+    console.log(`AP mode command sent to robot ${normalizedRobotId}`);
+    return commandPayload;
+  }
+
   await pool.query(
     `DELETE FROM commands
      WHERE robot_id = $1 AND executed = FALSE`,
@@ -115,11 +141,6 @@ async function sendCommand(robotId, command) {
      RETURNING *`,
     [normalizedRobotId, normalizedCommand]
   );
-
-  const robotSocket = robotClients.get(normalizedRobotId);
-  if (!isRobotOnline(normalizedRobotId) || !robotSocket || robotSocket.readyState !== WebSocket.OPEN) {
-    throw new Error('Robot is not connected');
-  }
 
   const didSend = safeSend(robotSocket, {
     type: 'command',
