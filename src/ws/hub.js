@@ -10,8 +10,9 @@ function normalizeRobotId(robotId) {
 }
 
 function safeSend(ws, message) {
-  if (ws.readyState !== WebSocket.OPEN) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
   ws.send(JSON.stringify(message));
+  return true;
 }
 
 function broadcastToApps(message) {
@@ -97,13 +98,19 @@ async function sendCommand(robotId, command) {
   );
 
   const robotSocket = robotClients.get(normalizedRobotId);
-  if (robotSocket) {
-    safeSend(robotSocket, {
-      type: 'command',
-      id: rows[0].id,
-      command: normalizedCommand,
-      created_at: rows[0].created_at,
-    });
+  if (!robotSocket || robotSocket.readyState !== WebSocket.OPEN) {
+    throw new Error('Robot is not connected');
+  }
+
+  const didSend = safeSend(robotSocket, {
+    type: 'command',
+    id: rows[0].id,
+    command: normalizedCommand,
+    created_at: rows[0].created_at,
+  });
+
+  if (!didSend) {
+    throw new Error('Robot is not connected');
   }
 
   return rows[0];
@@ -169,8 +176,28 @@ function authenticate(req, url) {
 
 function attachWebSocketServer(server) {
   const wss = new WebSocketServer({ server, path: '/ws' });
+  const heartbeatInterval = setInterval(() => {
+    for (const client of wss.clients) {
+      if (client.isAlive === false) {
+        client.terminate();
+        continue;
+      }
+
+      client.isAlive = false;
+      client.ping();
+    }
+  }, 10000);
+
+  wss.on('close', () => {
+    clearInterval(heartbeatInterval);
+  });
 
   wss.on('connection', async (ws, req) => {
+    ws.isAlive = true;
+    ws.on('pong', () => {
+      ws.isAlive = true;
+    });
+
     const url = new URL(req.url, `http://${req.headers.host}`);
 
     if (!authenticate(req, url)) {
