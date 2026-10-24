@@ -129,32 +129,55 @@ async function sendCommand(robotId, command) {
     return commandPayload;
   }
 
-  await pool.query(
-    `DELETE FROM commands
-     WHERE robot_id = $1 AND executed = FALSE`,
-    [normalizedRobotId]
-  );
-
-  const { rows } = await pool.query(
-    `INSERT INTO commands (robot_id, command)
-     VALUES ($1, $2)
-     RETURNING *`,
-    [normalizedRobotId, normalizedCommand]
-  );
-
+  // ── Gerçek zamanlı motor komutu ──
+  // Komut, HİÇBİR await'ten önce robota senkron olarak iletilir. Böylece:
+  //  • Uygulamadan gelen komutlar robota tam olarak geldiği sırada ulaşır
+  //    (önceden her komut DB sorgularını beklediği için kısa "L" → "S" darbelerinde
+  //     "S", "L"den önce varabiliyor ve robot dönmeye devam edebiliyordu).
+  //  • DB gecikmesi motor gecikmesine eklenmez (yüz takibi için kritik).
+  const createdAt = new Date().toISOString();
   const didSend = safeSend(robotSocket, {
     type: 'command',
-    id: rows[0].id,
+    id: null,
     command: normalizedCommand,
-    created_at: rows[0].created_at,
+    created_at: createdAt,
   });
 
   if (!didSend) {
     throw new Error('Robot is not connected');
   }
 
-  console.log(`Command ${normalizedCommand} sent to robot ${normalizedRobotId}`);
-  return rows[0];
+  // Geçmiş kaydı arka planda, robot başına sıralı olarak yazılır (pool taşmasını önler).
+  // WebSocket ile teslim edildiği için executed = TRUE; eski REST polling yolu tekrar çalıştırmaz.
+  logCommandAsync(normalizedRobotId, normalizedCommand);
+
+  return {
+    id: null,
+    robot_id: normalizedRobotId,
+    command: normalizedCommand,
+    created_at: createdAt,
+  };
+}
+
+const commandLogChains = new Map();
+
+function logCommandAsync(robotId, command) {
+  const previous = commandLogChains.get(robotId) || Promise.resolve();
+  const next = previous
+    .then(() => pool.query(
+      `INSERT INTO commands (robot_id, command, executed, executed_at)
+       VALUES ($1, $2, TRUE, NOW())`,
+      [robotId, command]
+    ))
+    .catch((err) => {
+      console.error(`Command log failed (robot=${robotId} command=${command}):`, err.message);
+    });
+  commandLogChains.set(robotId, next);
+  next.finally(() => {
+    if (commandLogChains.get(robotId) === next) {
+      commandLogChains.delete(robotId);
+    }
+  });
 }
 
 async function registerRobot(name, id = null) {
