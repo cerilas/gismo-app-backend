@@ -97,6 +97,26 @@ CREATE TABLE IF NOT EXISTS sms_settings (
 INSERT INTO sms_settings (id, netgsm_usercode, netgsm_password, netgsm_header, is_active)
 VALUES (1, '8503044989', 'Dnz.24232423', 'CERILAS AS', TRUE)
 ON CONFLICT (id) DO NOTHING;
+
+-- ─────────────────────────────────────────────
+-- USER MEMORIES TABLE (Gismo Permanent Memory)
+-- ─────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS user_memories (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id     UUID REFERENCES users(id) ON DELETE CASCADE,
+  device_id   TEXT,
+  category    TEXT NOT NULL DEFAULT 'note',
+  subject     TEXT NOT NULL,
+  content     TEXT NOT NULL,
+  updated_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  created_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_memories_user
+  ON user_memories(user_id, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_user_memories_device
+  ON user_memories(device_id, updated_at DESC);
 `;
 
 async function migrate() {

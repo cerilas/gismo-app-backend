@@ -9,6 +9,7 @@ const rateLimit = require('express-rate-limit');
 const { migrate }       = require('./db/migrate');
 const { requireApiKey } = require('./middleware/auth');
 const authRouter        = require('./routes/auth');
+const memoriesRouter    = require('./routes/memories');
 const robotsRouter      = require('./routes/robots');
 const commandsRouter    = require('./routes/commands');
 const { attachWebSocketServer } = require('./ws/hub');
@@ -58,6 +59,7 @@ app.get('/', (req, res) => {
 });
 
 app.use('/api/auth',     authRouter);
+app.use('/api/memories', memoriesRouter);
 app.use('/api/robots',   robotsRouter);
 app.use('/api/commands', commandsRouter);
 
