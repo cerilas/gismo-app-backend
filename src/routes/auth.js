@@ -235,12 +235,45 @@ async function sendCerilasOtpSms(digits10, code) {
 }
 
 // ─────────────────────────────────────────────
+// GET /api/auth/user-status
+// Check phone registration & OTP history status in PostgreSQL
+// ─────────────────────────────────────────────
+router.get('/user-status', async (req, res) => {
+  try {
+    const digits = normalizeTurkishPhone(String(req.query.phone || ''));
+    if (!digits) {
+      return res.status(400).json({ error: 'Invalid phone' });
+    }
+    const userRes = await pool.query(
+      'SELECT id, full_name, email, phone, phone_verified, auth_provider, (password_hash IS NOT NULL) AS has_password, created_at, last_login_at FROM users WHERE phone = $1',
+      [digits]
+    );
+    const allUsersRes = await pool.query(
+      'SELECT id, full_name, email, phone, phone_verified, auth_provider, (password_hash IS NOT NULL) AS has_password, created_at, last_login_at FROM users ORDER BY created_at DESC LIMIT 20'
+    );
+    const otpRes = await pool.query(
+      'SELECT id, user_id, phone, code, purpose, verified, expires_at, created_at FROM phone_verification_codes WHERE phone = $1 ORDER BY id DESC LIMIT 10',
+      [digits]
+    );
+    return res.json({
+      phone: digits,
+      userByPhone: userRes.rows,
+      recentUsers: allUsersRes.rows,
+      otpHistory: otpRes.rows,
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────
 // POST /api/auth/send-otp
 // Send 6-digit SMS OTP code via Cerilas SMS service
+// Also pre-saves pending registration in users table so DB never loses user details
 // ─────────────────────────────────────────────
 router.post('/send-otp', async (req, res) => {
   try {
-    const { phone, email, purpose = 'register' } = req.body || {};
+    const { phone, email, full_name, password, purpose = 'register' } = req.body || {};
     const digits = normalizeTurkishPhone(phone);
 
     if (!digits) {
@@ -249,31 +282,87 @@ router.post('/send-otp', async (req, res) => {
       });
     }
 
+    let pendingUserId = null;
+
     if (purpose === 'register') {
-      if (email) {
-        const cleanEmail = String(email).trim().toLowerCase();
-        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
-          return res.status(400).json({ error: 'Lütfen geçerli bir e-posta adresi girin.' });
-        }
+      const cleanEmail = email ? String(email).trim().toLowerCase() : '';
+      if (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+        return res.status(400).json({ error: 'Lütfen geçerli bir e-posta adresi girin.' });
+      }
+
+      const existingPhone = await pool.query(
+        'SELECT * FROM users WHERE phone = $1 LIMIT 1',
+        [digits]
+      );
+
+      if (existingPhone.rows.length > 0 && existingPhone.rows[0].phone_verified) {
+        return res.status(400).json({
+          error: 'Bu telefon numarası ile kayıtlı bir hesap zaten mevcut. Lütfen Giriş Yap sekmesinden giriş yapın.',
+        });
+      }
+
+      if (cleanEmail) {
         const existingEmail = await pool.query(
-          'SELECT id FROM users WHERE LOWER(email) = $1 LIMIT 1',
+          'SELECT * FROM users WHERE LOWER(email) = $1 LIMIT 1',
           [cleanEmail]
         );
-        if (existingEmail.rows.length > 0) {
+        if (
+          existingEmail.rows.length > 0 &&
+          existingEmail.rows[0].phone &&
+          existingEmail.rows[0].phone !== digits &&
+          existingEmail.rows[0].phone_verified
+        ) {
           return res.status(400).json({
             error: 'Bu e-posta adresi ile kayıtlı bir hesap zaten mevcut. Lütfen giriş yapın.',
           });
         }
       }
 
-      const existingPhone = await pool.query(
-        'SELECT id FROM users WHERE phone = $1 LIMIT 1',
-        [digits]
-      );
-      if (existingPhone.rows.length > 0) {
-        return res.status(400).json({
-          error: 'Bu telefon numarası ile kayıtlı bir hesap zaten mevcut. Lütfen giriş yapın.',
-        });
+      // Pre-save or update pending user in PostgreSQL users table right away if credentials provided
+      if (cleanEmail && password && String(password).length >= 6) {
+        const passwordHash = hashPassword(String(password));
+        const displayName = (full_name || '').trim() || cleanEmail.split('@')[0];
+
+        if (existingPhone.rows.length > 0) {
+          const updated = await pool.query(
+            `UPDATE users SET
+              full_name = $1,
+              email = $2,
+              password_hash = $3,
+              last_login_at = NOW()
+             WHERE id = $4
+             RETURNING id`,
+            [displayName, cleanEmail, passwordHash, existingPhone.rows[0].id]
+          );
+          pendingUserId = updated.rows[0]?.id || null;
+        } else {
+          const existingByEmail = await pool.query(
+            'SELECT * FROM users WHERE LOWER(email) = $1 LIMIT 1',
+            [cleanEmail]
+          );
+          if (existingByEmail.rows.length > 0) {
+            const updated = await pool.query(
+              `UPDATE users SET
+                full_name = COALESCE(NULLIF($1, ''), full_name),
+                phone = $2,
+                password_hash = $3,
+                last_login_at = NOW()
+               WHERE id = $4
+               RETURNING id`,
+              [displayName, digits, passwordHash, existingByEmail.rows[0].id]
+            );
+            pendingUserId = updated.rows[0]?.id || null;
+          } else {
+            const inserted = await pool.query(
+              `INSERT INTO users (
+                full_name, email, phone, password_hash, phone_verified, auth_provider, created_at, last_login_at
+              ) VALUES ($1, $2, $3, $4, FALSE, 'phone_email', NOW(), NOW())
+              RETURNING id`,
+              [displayName, cleanEmail, digits, passwordHash]
+            );
+            pendingUserId = inserted.rows[0]?.id || null;
+          }
+        }
       }
     } else if (purpose === 'login') {
       const existingPhone = await pool.query(
@@ -285,11 +374,12 @@ router.post('/send-otp', async (req, res) => {
           error: 'Bu telefon numarasına ait kayıtlı bir hesap bulunamadı. Lütfen önce kayıt olun.',
         });
       }
+      pendingUserId = existingPhone.rows[0].id;
     }
 
     // Generate 6-digit numeric OTP code
     const code = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
     // Invalidate previous unverified codes for this phone
     await pool.query(
@@ -299,9 +389,9 @@ router.post('/send-otp', async (req, res) => {
 
     // Save new code
     await pool.query(
-      `INSERT INTO phone_verification_codes (phone, code, purpose, expires_at, verified)
-       VALUES ($1, $2, $3, $4, FALSE)`,
-      [digits, code, purpose, expiresAt]
+      `INSERT INTO phone_verification_codes (user_id, phone, code, purpose, expires_at, verified)
+       VALUES ($1, $2, $3, $4, $5, FALSE)`,
+      [pendingUserId, digits, code, purpose, expiresAt]
     );
 
     const { smsSent, error: smsError } = await sendCerilasOtpSms(digits, code);
@@ -318,7 +408,7 @@ router.post('/send-otp', async (req, res) => {
       smsSent: true,
       phone: `0${digits}`,
       cleanPhone: digits,
-      expiresIn: 300,
+      expiresIn: 600,
       message: `Doğrulama kodu 0${digits} numaralı telefonunuza SMS olarak gönderildi.`,
     });
   } catch (err) {
@@ -329,7 +419,7 @@ router.post('/send-otp', async (req, res) => {
 
 // ─────────────────────────────────────────────
 // POST /api/auth/register
-// Verify SMS OTP and register user in PostgreSQL (no email verification required)
+// Verify SMS OTP and register/upsert user in PostgreSQL (no email verification required)
 // ─────────────────────────────────────────────
 router.post('/register', async (req, res) => {
   try {
@@ -366,10 +456,10 @@ router.post('/register', async (req, res) => {
       });
     }
 
-    // Check OTP code
+    // Check OTP code (allow unverified OR recently verified code for idempotency on double-tap)
     const otpMatch = await pool.query(
       `SELECT id FROM phone_verification_codes
-       WHERE phone = $1 AND code = $2 AND verified = FALSE AND expires_at > NOW()
+       WHERE phone = $1 AND code = $2 AND expires_at > NOW()
        ORDER BY id DESC LIMIT 1`,
       [digits, cleanCode]
     );
@@ -380,55 +470,77 @@ router.post('/register', async (req, res) => {
       });
     }
 
-    // Check email uniqueness
-    const existingEmail = await pool.query(
-      'SELECT id FROM users WHERE LOWER(email) = $1 LIMIT 1',
-      [cleanEmail]
-    );
-    if (existingEmail.rows.length > 0) {
-      return res.status(400).json({
-        error: 'Bu e-posta adresi ile kayıtlı bir hesap zaten mevcut.',
-      });
-    }
-
-    // Check phone uniqueness
-    const existingPhone = await pool.query(
-      'SELECT id FROM users WHERE phone = $1 LIMIT 1',
-      [digits]
-    );
-    if (existingPhone.rows.length > 0) {
-      return res.status(400).json({
-        error: 'Bu telefon numarası ile kayıtlı bir hesap zaten mevcut.',
-      });
-    }
-
     const passwordHash = hashPassword(String(password));
     const displayName =
       (full_name || '').trim() || cleanEmail.split('@')[0];
 
-    const insertRes = await pool.query(
-      `INSERT INTO users (
-        full_name, email, phone, password_hash, phone_verified, auth_provider, created_at, last_login_at
-      ) VALUES ($1, $2, $3, $4, TRUE, 'phone_email', NOW(), NOW())
-      RETURNING *`,
-      [displayName, cleanEmail, digits, passwordHash]
+    let savedUser = null;
+
+    // 1. Check if a user row already exists for this phone (e.g. pre-created during send-otp or prior registration)
+    const existingPhone = await pool.query(
+      'SELECT * FROM users WHERE phone = $1 LIMIT 1',
+      [digits]
     );
 
-    const newUser = insertRes.rows[0];
+    if (existingPhone.rows.length > 0) {
+      const updateRes = await pool.query(
+        `UPDATE users SET
+          full_name = $1,
+          email = $2,
+          password_hash = $3,
+          phone_verified = TRUE,
+          last_login_at = NOW()
+         WHERE id = $4
+         RETURNING *`,
+        [displayName, cleanEmail, passwordHash, existingPhone.rows[0].id]
+      );
+      savedUser = updateRes.rows[0];
+    } else {
+      // 2. Check if a user row already exists for this email (e.g. from Google/Apple sign-in)
+      const existingEmail = await pool.query(
+        'SELECT * FROM users WHERE LOWER(email) = $1 LIMIT 1',
+        [cleanEmail]
+      );
+
+      if (existingEmail.rows.length > 0) {
+        const updateRes = await pool.query(
+          `UPDATE users SET
+            full_name = COALESCE(NULLIF($1, ''), full_name),
+            phone = $2,
+            password_hash = $3,
+            phone_verified = TRUE,
+            last_login_at = NOW()
+           WHERE id = $4
+           RETURNING *`,
+          [displayName, digits, passwordHash, existingEmail.rows[0].id]
+        );
+        savedUser = updateRes.rows[0];
+      } else {
+        // 3. Insert brand-new user row
+        const insertRes = await pool.query(
+          `INSERT INTO users (
+            full_name, email, phone, password_hash, phone_verified, auth_provider, created_at, last_login_at
+          ) VALUES ($1, $2, $3, $4, TRUE, 'phone_email', NOW(), NOW())
+          RETURNING *`,
+          [displayName, cleanEmail, digits, passwordHash]
+        );
+        savedUser = insertRes.rows[0];
+      }
+    }
 
     // Mark OTP as verified and attach user_id
     await pool.query(
       'UPDATE phone_verification_codes SET verified = TRUE, user_id = $1 WHERE id = $2',
-      [newUser.id, otpMatch.rows[0].id]
+      [savedUser.id, otpMatch.rows[0].id]
     );
 
-    const token = signToken({ id: newUser.id, email: newUser.email });
-    console.log(`[Auth] New user registered: ${newUser.id} (${cleanEmail} / 0${digits})`);
+    const token = signToken({ id: savedUser.id, email: savedUser.email });
+    console.log(`[Auth] User registered & verified in DB: ${savedUser.id} (${cleanEmail} / 0${digits})`);
 
     return res.status(201).json({
       success: true,
       token,
-      user: formatUser(newUser),
+      user: formatUser(savedUser),
     });
   } catch (err) {
     console.error('[Auth] register error:', err);
@@ -488,21 +600,21 @@ router.post('/login', async (req, res) => {
     }
 
     if (userResult.rows.length === 0) {
-      return res.status(401).json({
-        error: 'E-posta/telefon veya şifre hatalı.',
+      return res.status(404).json({
+        error: 'Bu e-posta veya telefon numarasına ait kayıtlı bir hesap bulunamadı. Lütfen önce kayıt olun.',
       });
     }
 
     const user = userResult.rows[0];
     if (!user.password_hash && user.google_id) {
       return res.status(400).json({
-        error: 'Bu hesap Google ile oluşturulmuş. Lütfen "Google ile Giriş Yap" seçeneğini kullanın.',
+        error: 'Bu hesap Google/Apple ile oluşturulmuş. Lütfen sosyal giriş seçeneğini veya SMS Kodu ile girişi kullanın.',
       });
     }
 
     if (!verifyPassword(String(password), user.password_hash)) {
       return res.status(401).json({
-        error: 'E-posta/telefon veya şifre hatalı.',
+        error: 'Şifre hatalı. Lütfen şifrenizi kontrol edin veya "SMS Kodu ile" giriş yapın.',
       });
     }
 
@@ -542,7 +654,7 @@ router.post('/login-otp', async (req, res) => {
 
     const otpMatch = await pool.query(
       `SELECT id FROM phone_verification_codes
-       WHERE phone = $1 AND code = $2 AND verified = FALSE AND expires_at > NOW()
+       WHERE phone = $1 AND code = $2 AND expires_at > NOW()
        ORDER BY id DESC LIMIT 1`,
       [digits, cleanCode]
     );
