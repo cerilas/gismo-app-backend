@@ -14,28 +14,21 @@ router.get('/', async (req, res) => {
     }
 
     let result;
-    if (userId && deviceId) {
-      result = await pool.query(
-        `SELECT * FROM user_memories
-         WHERE user_id::text = $1 OR device_id = $2
-         ORDER BY updated_at DESC
-         LIMIT 150`,
-        [userId, deviceId]
-      );
-    } else if (userId) {
+    if (userId) {
+      // Strictly isolate memories per authenticated user_id
       result = await pool.query(
         `SELECT * FROM user_memories
          WHERE user_id::text = $1
          ORDER BY updated_at DESC
-         LIMIT 150`,
+         LIMIT 200`,
         [userId]
       );
     } else {
       result = await pool.query(
         `SELECT * FROM user_memories
-         WHERE device_id = $1
+         WHERE device_id = $1 AND user_id IS NULL
          ORDER BY updated_at DESC
-         LIMIT 150`,
+         LIMIT 200`,
         [deviceId]
       );
     }
