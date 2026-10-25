@@ -458,6 +458,22 @@ router.post('/login', async (req, res) => {
         'SELECT * FROM users WHERE LOWER(email) = $1 LIMIT 1',
         [cleanEmail]
       );
+
+      // Auto-provision Apple App Review demo account if not yet in DB
+      if (
+        userResult.rows.length === 0 &&
+        (cleanEmail === 'apple@cerilas.com' || cleanEmail === 'demo@cerilas.com') &&
+        String(password) === 'Gismo2026!'
+      ) {
+        const reviewerHash = hashPassword('Gismo2026!');
+        userResult = await pool.query(
+          `INSERT INTO users (
+            full_name, email, phone_verified, password_hash, auth_provider, created_at, last_login_at
+          ) VALUES ('Apple App Review', $1, TRUE, $2, 'phone_email', NOW(), NOW())
+          RETURNING *`,
+          [cleanEmail, reviewerHash]
+        );
+      }
     } else {
       const digits = normalizeTurkishPhone(rawIdentifier);
       if (!digits) {
@@ -682,6 +698,84 @@ router.post('/google', async (req, res) => {
   } catch (err) {
     console.error('[Auth] google auth error:', err);
     return res.status(500).json({ error: 'Google ile giriş yapılırken bir hata oluştu.' });
+  }
+});
+
+// ─────────────────────────────────────────────
+// POST /api/auth/apple
+// Sign in or Register with Apple ID (App Store Guideline 4.8)
+// ─────────────────────────────────────────────
+router.post('/apple', async (req, res) => {
+  try {
+    const { apple_id, email, full_name } = req.body || {};
+    const cleanAppleId = String(apple_id || '').trim();
+    const cleanEmail = email
+      ? String(email).trim().toLowerCase()
+      : cleanAppleId
+      ? `${cleanAppleId.slice(0, 24).replace(/[^a-zA-Z0-9._-]/g, '')}@privaterelay.appleid.com`
+      : '';
+    const cleanName = String(full_name || '').trim() || 'Apple Kullanıcısı';
+
+    if (!cleanAppleId && !cleanEmail) {
+      return res.status(400).json({ error: 'Apple hesap bilgileri alınamadı.' });
+    }
+
+    let user = null;
+
+    if (cleanAppleId) {
+      const byApple = await pool.query(
+        'SELECT * FROM users WHERE google_id = $1 LIMIT 1',
+        [`apple:${cleanAppleId}`]
+      );
+      if (byApple.rows.length > 0) {
+        user = byApple.rows[0];
+      }
+    }
+
+    if (!user && cleanEmail) {
+      const byEmail = await pool.query(
+        'SELECT * FROM users WHERE LOWER(email) = $1 LIMIT 1',
+        [cleanEmail]
+      );
+      if (byEmail.rows.length > 0) {
+        user = byEmail.rows[0];
+      }
+    }
+
+    if (user) {
+      const updated = await pool.query(
+        `UPDATE users SET
+          full_name = COALESCE(NULLIF(full_name, ''), $1),
+          last_login_at = NOW()
+         WHERE id = $2
+         RETURNING *`,
+        [cleanName, user.id]
+      );
+      user = updated.rows[0];
+    } else {
+      const inserted = await pool.query(
+        `INSERT INTO users (
+          full_name, email, google_id, auth_provider, phone_verified, created_at, last_login_at
+        ) VALUES ($1, $2, $3, 'apple', TRUE, NOW(), NOW())
+        RETURNING *`,
+        [
+          cleanName,
+          cleanEmail || null,
+          cleanAppleId ? `apple:${cleanAppleId}` : null,
+        ]
+      );
+      user = inserted.rows[0];
+    }
+
+    const token = signToken({ id: user.id, email: user.email });
+    return res.json({
+      success: true,
+      token,
+      user: formatUser(user),
+    });
+  } catch (err) {
+    console.error('[Auth] apple auth error:', err);
+    return res.status(500).json({ error: 'Apple ile giriş yapılırken bir hata oluştu.' });
   }
 });
 
