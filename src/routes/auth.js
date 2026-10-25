@@ -235,38 +235,6 @@ async function sendCerilasOtpSms(digits10, code) {
 }
 
 // ─────────────────────────────────────────────
-// GET /api/auth/user-status
-// Check phone registration & OTP history status in PostgreSQL
-// ─────────────────────────────────────────────
-router.get('/user-status', async (req, res) => {
-  try {
-    const digits = normalizeTurkishPhone(String(req.query.phone || ''));
-    if (!digits) {
-      return res.status(400).json({ error: 'Invalid phone' });
-    }
-    const userRes = await pool.query(
-      'SELECT id, full_name, email, phone, phone_verified, auth_provider, (password_hash IS NOT NULL) AS has_password, created_at, last_login_at FROM users WHERE phone = $1',
-      [digits]
-    );
-    const allUsersRes = await pool.query(
-      'SELECT id, full_name, email, phone, phone_verified, auth_provider, (password_hash IS NOT NULL) AS has_password, created_at, last_login_at FROM users ORDER BY created_at DESC LIMIT 20'
-    );
-    const otpRes = await pool.query(
-      'SELECT id, user_id, phone, code, purpose, verified, expires_at, created_at FROM phone_verification_codes WHERE phone = $1 ORDER BY id DESC LIMIT 10',
-      [digits]
-    );
-    return res.json({
-      phone: digits,
-      userByPhone: userRes.rows,
-      recentUsers: allUsersRes.rows,
-      otpHistory: otpRes.rows,
-    });
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
-  }
-});
-
-// ─────────────────────────────────────────────
 // POST /api/auth/send-otp
 // Send 6-digit SMS OTP code via Cerilas SMS service
 // Also pre-saves pending registration in users table so DB never loses user details
@@ -897,9 +865,15 @@ router.post('/apple', async (req, res) => {
 // ─────────────────────────────────────────────
 router.get('/me', requireUserAuth, async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM users WHERE id = $1 LIMIT 1', [
+    let result = await pool.query('SELECT * FROM users WHERE id = $1 LIMIT 1', [
       req.user.id,
     ]);
+    if (result.rows.length === 0 && req.user.email) {
+      result = await pool.query(
+        'SELECT * FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1',
+        [req.user.email]
+      );
+    }
     if (result.rows.length === 0) {
       return res.status(401).json({ error: 'Kullanıcı bulunamadı.' });
     }
