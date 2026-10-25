@@ -8,6 +8,7 @@ const rateLimit = require('express-rate-limit');
 
 const { migrate }       = require('./db/migrate');
 const { requireApiKey } = require('./middleware/auth');
+const authRouter        = require('./routes/auth');
 const robotsRouter      = require('./routes/robots');
 const commandsRouter    = require('./routes/commands');
 const { attachWebSocketServer } = require('./ws/hub');
@@ -56,6 +57,7 @@ app.get('/', (req, res) => {
   res.json({ message: 'Gismo Robot API 🤖', docs: '/health' });
 });
 
+app.use('/api/auth',     authRouter);
 app.use('/api/robots',   robotsRouter);
 app.use('/api/commands', commandsRouter);
 

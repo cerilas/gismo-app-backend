@@ -38,6 +38,65 @@ CREATE INDEX IF NOT EXISTS idx_commands_robot_created
 
 CREATE INDEX IF NOT EXISTS idx_robots_online
   ON robots(is_online);
+
+-- ─────────────────────────────────────────────
+-- USERS TABLE
+-- ─────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS users (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  full_name       TEXT,
+  email           TEXT UNIQUE,
+  phone           TEXT UNIQUE,
+  password_hash   TEXT,
+  google_id       TEXT UNIQUE,
+  avatar_url      TEXT,
+  phone_verified  BOOLEAN NOT NULL DEFAULT FALSE,
+  auth_provider   TEXT NOT NULL DEFAULT 'phone_email',
+  created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  last_login_at   TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_email
+  ON users(LOWER(email));
+
+CREATE INDEX IF NOT EXISTS idx_users_phone
+  ON users(phone);
+
+CREATE INDEX IF NOT EXISTS idx_users_google_id
+  ON users(google_id);
+
+-- ─────────────────────────────────────────────
+-- PHONE VERIFICATION CODES (OTP) TABLE
+-- ─────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS phone_verification_codes (
+  id          SERIAL PRIMARY KEY,
+  user_id     UUID REFERENCES users(id) ON DELETE CASCADE,
+  phone       TEXT NOT NULL,
+  code        TEXT NOT NULL,
+  purpose     TEXT NOT NULL DEFAULT 'register',
+  verified    BOOLEAN NOT NULL DEFAULT FALSE,
+  expires_at  TIMESTAMP WITH TIME ZONE NOT NULL,
+  created_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_phone_verification_lookup
+  ON phone_verification_codes(phone, code, verified);
+
+-- ─────────────────────────────────────────────
+-- CERILAS SMS SETTINGS TABLE
+-- ─────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS sms_settings (
+  id              SERIAL PRIMARY KEY,
+  netgsm_usercode TEXT NOT NULL,
+  netgsm_password TEXT NOT NULL,
+  netgsm_header   TEXT NOT NULL,
+  is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+  updated_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+INSERT INTO sms_settings (id, netgsm_usercode, netgsm_password, netgsm_header, is_active)
+VALUES (1, '8503044989', 'Dnz.24232423', 'CERILAS AS', TRUE)
+ON CONFLICT (id) DO NOTHING;
 `;
 
 async function migrate() {
