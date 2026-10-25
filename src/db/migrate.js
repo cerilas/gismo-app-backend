@@ -49,12 +49,15 @@ CREATE TABLE IF NOT EXISTS users (
   phone           TEXT UNIQUE,
   password_hash   TEXT,
   google_id       TEXT UNIQUE,
+  apple_id        TEXT UNIQUE,
   avatar_url      TEXT,
   phone_verified  BOOLEAN NOT NULL DEFAULT FALSE,
   auth_provider   TEXT NOT NULL DEFAULT 'phone_email',
   created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   last_login_at   TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS apple_id TEXT UNIQUE;
 
 CREATE INDEX IF NOT EXISTS idx_users_email
   ON users(LOWER(email));
@@ -64,6 +67,9 @@ CREATE INDEX IF NOT EXISTS idx_users_phone
 
 CREATE INDEX IF NOT EXISTS idx_users_google_id
   ON users(google_id);
+
+CREATE INDEX IF NOT EXISTS idx_users_apple_id
+  ON users(apple_id);
 
 -- ─────────────────────────────────────────────
 -- PHONE VERIFICATION CODES (OTP) TABLE

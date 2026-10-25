@@ -115,21 +115,116 @@ function formatUser(row) {
   if (!row) return null;
   const fullName =
     (row.full_name || '').trim() ||
-    (row.email ? row.email.split('@')[0] : 'Gismo Kullanıcısı');
+    (row.email ? row.email.split('@')[0] : 'Robot Kullanıcısı');
+  const rawGoogleId = row.google_id || null;
+  const isRealGoogle = Boolean(rawGoogleId && !String(rawGoogleId).startsWith('apple:'));
   return {
     id: row.id,
     full_name: fullName,
     email: row.email || '',
     phone: row.phone ? `0${row.phone}` : '',
     clean_phone: row.phone || '',
-    phone_verified: Boolean(row.phone_verified),
-    google_id: row.google_id || null,
-    is_google_connected: Boolean(row.google_id),
+    phone_verified: Boolean(row.phone_verified && row.phone),
+    google_id: isRealGoogle ? rawGoogleId : null,
+    apple_id: row.apple_id || (rawGoogleId && String(rawGoogleId).startsWith('apple:') ? String(rawGoogleId).slice(6) : null),
+    is_google_connected: isRealGoogle,
     avatar_url: row.avatar_url || '',
     auth_provider: row.auth_provider || 'phone_email',
     created_at: row.created_at,
     last_login_at: row.last_login_at,
   };
+}
+
+/**
+ * Safely merge two user rows (e.g. when a Phone+Email account and a Google/Apple account share the same email/identity)
+ * Keeps targetUser (preferring the row that has a verified phone number), migrates memories/OTPs, and deletes sourceUser.
+ */
+async function mergeUserAccounts(userA, userB) {
+  if (!userA) return userB;
+  if (!userB) return userA;
+  if (userA.id === userB.id) return userA;
+
+  // Prefer the row that has a phone number attached as primary target
+  const target = userA.phone ? userA : (userB.phone ? userB : userA);
+  const source = target.id === userA.id ? userB : userA;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Move permanent memories and OTP history to target user
+    await client.query(
+      'UPDATE user_memories SET user_id = $1 WHERE user_id = $2',
+      [target.id, source.id]
+    );
+    await client.query(
+      'UPDATE phone_verification_codes SET user_id = $1 WHERE user_id = $2',
+      [target.id, source.id]
+    );
+
+    const mergedFullName =
+      (target.full_name && !target.full_name.includes('Kullanıcısı') ? target.full_name : null) ||
+      (source.full_name && !source.full_name.includes('Kullanıcısı') ? source.full_name : null) ||
+      target.full_name ||
+      source.full_name;
+    const mergedEmail =
+      (target.email && !target.email.endsWith('@privaterelay.appleid.com') ? target.email : null) ||
+      (source.email && !source.email.endsWith('@privaterelay.appleid.com') ? source.email : null) ||
+      target.email ||
+      source.email;
+    const mergedPhone = target.phone || source.phone || null;
+    const mergedPasswordHash = target.password_hash || source.password_hash || null;
+    const targetGoogle = target.google_id && !String(target.google_id).startsWith('apple:') ? target.google_id : null;
+    const sourceGoogle = source.google_id && !String(source.google_id).startsWith('apple:') ? source.google_id : null;
+    const mergedGoogleId = targetGoogle || sourceGoogle || null;
+    const mergedAppleId =
+      target.apple_id ||
+      source.apple_id ||
+      (target.google_id && String(target.google_id).startsWith('apple:') ? String(target.google_id).slice(6) : null) ||
+      (source.google_id && String(source.google_id).startsWith('apple:') ? String(source.google_id).slice(6) : null) ||
+      null;
+    const mergedAvatar = target.avatar_url || source.avatar_url || null;
+    const mergedPhoneVerified = Boolean(target.phone_verified || source.phone_verified);
+
+    // Delete source row first so UNIQUE constraints (email, phone, google_id, apple_id) don't conflict
+    await client.query('DELETE FROM users WHERE id = $1', [source.id]);
+
+    const updated = await client.query(
+      `UPDATE users SET
+        full_name = $1,
+        email = $2,
+        phone = $3,
+        password_hash = $4,
+        google_id = $5,
+        apple_id = $6,
+        avatar_url = $7,
+        phone_verified = $8,
+        last_login_at = NOW()
+       WHERE id = $9
+       RETURNING *`,
+      [
+        mergedFullName,
+        mergedEmail,
+        mergedPhone,
+        mergedPasswordHash,
+        mergedGoogleId,
+        mergedAppleId,
+        mergedAvatar,
+        mergedPhoneVerified,
+        target.id,
+      ]
+    );
+
+    await client.query('COMMIT');
+    console.log(`[Auth Merge] Merged user ${source.id} into ${target.id} (${mergedEmail})`);
+    return updated.rows[0];
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[Auth Merge] Failed to merge users:', err.message);
+    return target;
+  } finally {
+    client.release();
+  }
 }
 
 function requireUserAuth(req, res, next) {
@@ -444,56 +539,43 @@ router.post('/register', async (req, res) => {
 
     let savedUser = null;
 
-    // 1. Check if a user row already exists for this phone (e.g. pre-created during send-otp or prior registration)
     const existingPhone = await pool.query(
       'SELECT * FROM users WHERE phone = $1 LIMIT 1',
       [digits]
     );
+    const existingEmail = await pool.query(
+      'SELECT * FROM users WHERE LOWER(email) = $1 LIMIT 1',
+      [cleanEmail]
+    );
 
-    if (existingPhone.rows.length > 0) {
+    const mergedExisting = await mergeUserAccounts(
+      existingPhone.rows[0] || null,
+      existingEmail.rows[0] || null
+    );
+
+    if (mergedExisting) {
       const updateRes = await pool.query(
         `UPDATE users SET
-          full_name = $1,
+          full_name = COALESCE(NULLIF($1, ''), full_name),
           email = $2,
-          password_hash = $3,
+          phone = $3,
+          password_hash = $4,
           phone_verified = TRUE,
           last_login_at = NOW()
-         WHERE id = $4
+         WHERE id = $5
          RETURNING *`,
-        [displayName, cleanEmail, passwordHash, existingPhone.rows[0].id]
+        [displayName, cleanEmail, digits, passwordHash, mergedExisting.id]
       );
       savedUser = updateRes.rows[0];
     } else {
-      // 2. Check if a user row already exists for this email (e.g. from Google/Apple sign-in)
-      const existingEmail = await pool.query(
-        'SELECT * FROM users WHERE LOWER(email) = $1 LIMIT 1',
-        [cleanEmail]
+      const insertRes = await pool.query(
+        `INSERT INTO users (
+          full_name, email, phone, password_hash, phone_verified, auth_provider, created_at, last_login_at
+        ) VALUES ($1, $2, $3, $4, TRUE, 'phone_email', NOW(), NOW())
+        RETURNING *`,
+        [displayName, cleanEmail, digits, passwordHash]
       );
-
-      if (existingEmail.rows.length > 0) {
-        const updateRes = await pool.query(
-          `UPDATE users SET
-            full_name = COALESCE(NULLIF($1, ''), full_name),
-            phone = $2,
-            password_hash = $3,
-            phone_verified = TRUE,
-            last_login_at = NOW()
-           WHERE id = $4
-           RETURNING *`,
-          [displayName, digits, passwordHash, existingEmail.rows[0].id]
-        );
-        savedUser = updateRes.rows[0];
-      } else {
-        // 3. Insert brand-new user row
-        const insertRes = await pool.query(
-          `INSERT INTO users (
-            full_name, email, phone, password_hash, phone_verified, auth_provider, created_at, last_login_at
-          ) VALUES ($1, $2, $3, $4, TRUE, 'phone_email', NOW(), NOW())
-          RETURNING *`,
-          [displayName, cleanEmail, digits, passwordHash]
-        );
-        savedUser = insertRes.rows[0];
-      }
+      savedUser = insertRes.rows[0];
     }
 
     // Mark OTP as verified and attach user_id
@@ -707,7 +789,8 @@ router.post('/google', async (req, res) => {
       });
     }
 
-    let user = null;
+    let userByGoogle = null;
+    let userByEmail = null;
 
     // 1. Find by google_id
     if (verifiedGoogleId) {
@@ -716,39 +799,50 @@ router.post('/google', async (req, res) => {
         [verifiedGoogleId]
       );
       if (byGoogle.rows.length > 0) {
-        user = byGoogle.rows[0];
+        userByGoogle = byGoogle.rows[0];
       }
     }
 
-    // 2. Find by email and link google_id
-    if (!user && verifiedEmail) {
+    // 2. Find by email (auto-matches accounts registered with Phone + Email or Apple)
+    if (verifiedEmail) {
       const byEmail = await pool.query(
         'SELECT * FROM users WHERE LOWER(email) = $1 LIMIT 1',
         [verifiedEmail]
       );
       if (byEmail.rows.length > 0) {
-        user = byEmail.rows[0];
+        userByEmail = byEmail.rows[0];
       }
     }
 
+    // 3. Merge if both exist as separate rows, otherwise pick whichever exists
+    let user = await mergeUserAccounts(userByEmail, userByGoogle);
+
     if (user) {
+      const existingLegacyApple =
+        user.google_id && String(user.google_id).startsWith('apple:')
+          ? String(user.google_id).slice(6)
+          : null;
       const updated = await pool.query(
         `UPDATE users SET
-          google_id = COALESCE(google_id, $1),
-          full_name = COALESCE(NULLIF(full_name, ''), $2),
-          avatar_url = COALESCE(NULLIF(avatar_url, ''), $3),
+          google_id = COALESCE($1, google_id),
+          apple_id = COALESCE(apple_id, $2),
+          email = COALESCE(NULLIF(email, ''), $3),
+          full_name = COALESCE(NULLIF(full_name, ''), $4),
+          avatar_url = COALESCE(NULLIF($5, ''), avatar_url),
           last_login_at = NOW()
-         WHERE id = $4
+         WHERE id = $6
          RETURNING *`,
         [
           verifiedGoogleId || null,
+          existingLegacyApple,
+          verifiedEmail || null,
           verifiedName || null,
           verifiedAvatar || null,
           user.id,
         ]
       );
       user = updated.rows[0];
-      console.log(`[Google Auth] Existing user signed in: ${user.id} (${user.email})`);
+      console.log(`[Google Auth] Account matched/merged & signed in: ${user.id} (${user.email} / phone=${user.phone || 'none'})`);
     } else {
       const displayName =
         verifiedName ||
@@ -783,68 +877,106 @@ router.post('/google', async (req, res) => {
 
 // ─────────────────────────────────────────────
 // POST /api/auth/apple
-// Sign in or Register with Apple ID (App Store Guideline 4.8)
+// Sign in or Register with Apple ID & auto-merge with Phone/Google accounts sharing the same email
 // ─────────────────────────────────────────────
 router.post('/apple', async (req, res) => {
   try {
-    const { apple_id, email, full_name } = req.body || {};
-    const cleanAppleId = String(apple_id || '').trim();
-    const cleanEmail = email
-      ? String(email).trim().toLowerCase()
-      : cleanAppleId
-      ? `${cleanAppleId.slice(0, 24).replace(/[^a-zA-Z0-9._-]/g, '')}@privaterelay.appleid.com`
-      : '';
-    const cleanName = String(full_name || '').trim() || 'Apple Kullanıcısı';
+    const { apple_id, identity_token, email, full_name } = req.body || {};
+    let cleanAppleId = String(apple_id || '').trim();
+    let tokenEmail = '';
+
+    // Decode Apple identity_token JWT payload to always extract email & sub even on 2nd+ logins
+    if (identity_token && typeof identity_token === 'string') {
+      const parts = identity_token.split('.');
+      if (parts.length >= 2) {
+        try {
+          const payload = JSON.parse(base64UrlDecode(parts[1]));
+          if (payload) {
+            if (!cleanAppleId && payload.sub) {
+              cleanAppleId = String(payload.sub).trim();
+            }
+            if (payload.email) {
+              tokenEmail = String(payload.email).trim().toLowerCase();
+            }
+          }
+        } catch (decodeErr) {
+          console.warn('[Apple Auth] identity_token decode warning:', decodeErr.message);
+        }
+      }
+    }
+
+    const rawBodyEmail = email ? String(email).trim().toLowerCase() : '';
+    const realEmail = rawBodyEmail || tokenEmail;
+    const cleanEmail =
+      realEmail ||
+      (cleanAppleId
+        ? `${cleanAppleId.slice(0, 24).replace(/[^a-zA-Z0-9._-]/g, '')}@privaterelay.appleid.com`
+        : '');
+    const cleanName = String(full_name || '').trim();
 
     if (!cleanAppleId && !cleanEmail) {
       return res.status(400).json({ error: 'Apple hesap bilgileri alınamadı.' });
     }
 
-    let user = null;
+    let userByApple = null;
+    let userByEmail = null;
 
+    // 1. Find by apple_id (or legacy google_id = 'apple:...')
     if (cleanAppleId) {
       const byApple = await pool.query(
-        'SELECT * FROM users WHERE google_id = $1 LIMIT 1',
-        [`apple:${cleanAppleId}`]
+        'SELECT * FROM users WHERE apple_id = $1 OR google_id = $2 LIMIT 1',
+        [cleanAppleId, `apple:${cleanAppleId}`]
       );
       if (byApple.rows.length > 0) {
-        user = byApple.rows[0];
+        userByApple = byApple.rows[0];
       }
     }
 
-    if (!user && cleanEmail) {
+    // 2. Find by email (auto-matches accounts registered with Phone + Email or Google)
+    if (realEmail) {
       const byEmail = await pool.query(
         'SELECT * FROM users WHERE LOWER(email) = $1 LIMIT 1',
-        [cleanEmail]
+        [realEmail]
       );
       if (byEmail.rows.length > 0) {
-        user = byEmail.rows[0];
+        userByEmail = byEmail.rows[0];
       }
     }
+
+    // 3. Merge if both exist as separate rows, otherwise pick whichever exists
+    let user = await mergeUserAccounts(userByEmail, userByApple);
 
     if (user) {
       const updated = await pool.query(
         `UPDATE users SET
-          full_name = COALESCE(NULLIF(full_name, ''), $1),
+          apple_id = COALESCE($1, apple_id),
+          email = CASE
+            WHEN email IS NULL OR email = '' OR email LIKE '%@privaterelay.appleid.com'
+            THEN COALESCE(NULLIF($2, ''), email)
+            ELSE email
+          END,
+          full_name = COALESCE(NULLIF(full_name, ''), NULLIF($3, ''), 'Apple Kullanıcısı'),
           last_login_at = NOW()
-         WHERE id = $2
+         WHERE id = $4
          RETURNING *`,
-        [cleanName, user.id]
+        [cleanAppleId || null, realEmail || null, cleanName, user.id]
       );
       user = updated.rows[0];
+      console.log(`[Apple Auth] Account matched/merged & signed in: ${user.id} (${user.email} / phone=${user.phone || 'none'})`);
     } else {
       const inserted = await pool.query(
         `INSERT INTO users (
-          full_name, email, google_id, auth_provider, phone_verified, created_at, last_login_at
-        ) VALUES ($1, $2, $3, 'apple', TRUE, NOW(), NOW())
+          full_name, email, apple_id, auth_provider, phone_verified, created_at, last_login_at
+        ) VALUES ($1, $2, $3, 'apple', FALSE, NOW(), NOW())
         RETURNING *`,
         [
-          cleanName,
+          cleanName || 'Apple Kullanıcısı',
           cleanEmail || null,
-          cleanAppleId ? `apple:${cleanAppleId}` : null,
+          cleanAppleId || null,
         ]
       );
       user = inserted.rows[0];
+      console.log(`[Apple Auth] New user created in DB: ${user.id} (${user.email})`);
     }
 
     const token = signToken({ id: user.id, email: user.email });
