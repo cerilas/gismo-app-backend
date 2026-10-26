@@ -55,7 +55,7 @@ app.get('/health', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-  res.json({ message: 'Gismo Robot API 🤖', docs: '/health' });
+  res.json({ message: 'Milo: Desktop AI Companion Robot API 🤖', docs: '/health' });
 });
 
 app.use('/api/auth',     authRouter);

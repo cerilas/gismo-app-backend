@@ -266,7 +266,7 @@ async function sendCerilasOtpSms(digits10, code) {
   const authString = Buffer.from(
     `${settings.netgsm_usercode}:${settings.netgsm_password}`
   ).toString('base64');
-  const message = `Gismo dogrulama kodunuz: ${code}. Guvenliginiz icin bu kodu kimseyle paylasmayin.`;
+  const message = `Milo dogrulama kodunuz: ${code}. Guvenliginiz icin bu kodu kimseyle paylasmayin.`;
 
   // 1) Try Netgsm OTP endpoint (same as cerilas.com & tools-app)
   try {
