@@ -8,7 +8,7 @@ const pool = require('../db/pool');
 router.get('/', async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT id, name, last_ip, is_online, last_seen, created_at, switch_to_ap
+      `SELECT id, name, last_ip, is_online, battery_percent, battery_voltage, last_seen, created_at
        FROM robots
        ORDER BY created_at DESC`
     );
@@ -25,7 +25,7 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT id, name, last_ip, is_online, last_seen, created_at, switch_to_ap
+      `SELECT id, name, last_ip, is_online, battery_percent, battery_voltage, last_seen, created_at
        FROM robots WHERE id = $1`,
       [req.params.id]
     );
@@ -79,22 +79,30 @@ router.post('/', async (req, res) => {
 
 // ─────────────────────────────────────────────
 // PUT /api/robots/:id — Update robot status
-// Body: { last_ip?: string, is_online?: boolean }
+// Body: { last_ip?: string, is_online?: boolean, battery_percent?: number, battery_voltage?: number }
 // Called by ESP32 on connect/heartbeat
 // ─────────────────────────────────────────────
 router.put('/:id', async (req, res) => {
-  const { last_ip, is_online } = req.body;
+  const { last_ip, is_online, battery_percent, battery_voltage } = req.body;
 
   try {
     const { rows } = await pool.query(
       `UPDATE robots
        SET
-         last_ip   = COALESCE($2, last_ip),
-         is_online = COALESCE($3, is_online),
-         last_seen = NOW()
+         last_ip         = COALESCE($2, last_ip),
+         is_online       = COALESCE($3, is_online),
+         battery_percent = COALESCE($4, battery_percent),
+         battery_voltage = COALESCE($5, battery_voltage),
+         last_seen       = NOW()
        WHERE id = $1
        RETURNING *`,
-      [req.params.id, last_ip ?? null, is_online ?? null]
+      [
+        req.params.id,
+        last_ip ?? null,
+        is_online ?? null,
+        battery_percent ?? null,
+        battery_voltage ?? null,
+      ]
     );
     if (rows.length === 0) {
       return res.status(404).json({ error: 'Not found', message: 'Robot not found' });

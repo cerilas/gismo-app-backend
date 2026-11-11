@@ -8,13 +8,18 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 -- ROBOTS TABLE
 -- ─────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS robots (
-  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name        TEXT NOT NULL,
-  last_ip     TEXT,
-  is_online   BOOLEAN NOT NULL DEFAULT FALSE,
-  last_seen   TIMESTAMP WITH TIME ZONE,
-  created_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name            TEXT NOT NULL,
+  last_ip         TEXT,
+  is_online       BOOLEAN NOT NULL DEFAULT FALSE,
+  battery_percent INTEGER,
+  battery_voltage REAL,
+  last_seen       TIMESTAMP WITH TIME ZONE,
+  created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+ALTER TABLE robots ADD COLUMN IF NOT EXISTS battery_percent INTEGER;
+ALTER TABLE robots ADD COLUMN IF NOT EXISTS battery_voltage REAL;
 
 -- ─────────────────────────────────────────────
 -- COMMANDS TABLE

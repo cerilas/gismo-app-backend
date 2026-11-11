@@ -5,6 +5,7 @@ const VALID_COMMANDS = new Set(['F', 'B', 'L', 'R', 'S', 'A']);
 const appClients = new Set();
 const robotClients = new Map();
 const robotLastSeenAt = new Map();
+const robotBattery = new Map();
 const ROBOT_STALE_AFTER_MS = 5000;
 
 function normalizeRobotId(robotId) {
@@ -25,11 +26,24 @@ function broadcastToApps(message) {
 
 function normalizeRobot(row) {
   const robotId = normalizeRobotId(row.id);
+  const liveBattery = robotBattery.get(robotId);
+  const rawPercent = liveBattery ? liveBattery.battery_percent : row.battery_percent;
+  const rawVoltage = liveBattery ? liveBattery.battery_voltage : row.battery_voltage;
+  const validPercent = rawPercent !== null && rawPercent !== undefined && Number(rawPercent) > 0
+    ? Number(rawPercent)
+    : null;
+  const validVoltage = rawVoltage !== null && rawVoltage !== undefined && Number(rawVoltage) >= 5.0
+    ? Number(rawVoltage)
+    : null;
   return {
     id: robotId,
     name: row.name,
     last_ip: row.last_ip,
     is_online: isRobotOnline(robotId),
+    battery_percent: validPercent,
+    battery_voltage: validVoltage,
+    raw_battery_voltage: liveBattery?.raw_battery_voltage ?? null,
+    raw_battery_percent: liveBattery?.raw_battery_percent ?? null,
     last_seen: row.last_seen,
     created_at: row.created_at,
   };
@@ -54,7 +68,7 @@ function touchRobot(robotId) {
 
 async function fetchRobots() {
   const { rows } = await pool.query(
-    `SELECT id, name, last_ip, is_online, last_seen, created_at
+    `SELECT id, name, last_ip, is_online, battery_percent, battery_voltage, last_seen, created_at
      FROM robots
      ORDER BY created_at DESC`
   );
@@ -64,7 +78,7 @@ async function fetchRobots() {
 async function fetchRobot(robotId) {
   const normalizedRobotId = normalizeRobotId(robotId);
   const { rows } = await pool.query(
-    `SELECT id, name, last_ip, is_online, last_seen, created_at
+    `SELECT id, name, last_ip, is_online, battery_percent, battery_voltage, last_seen, created_at
      FROM robots
      WHERE id = $1`,
     [normalizedRobotId]
@@ -78,17 +92,19 @@ async function broadcastRobot(robotId) {
   broadcastToApps({ type: 'robot_update', robot });
 }
 
-async function markRobotOnline(robotId, isOnline, lastIp = null) {
+async function markRobotOnline(robotId, isOnline, lastIp = null, batteryPercent = null, batteryVoltage = null) {
   const normalizedRobotId = normalizeRobotId(robotId);
   const { rows } = await pool.query(
     `UPDATE robots
      SET
        is_online = $2,
        last_ip = COALESCE($3, last_ip),
+       battery_percent = COALESCE($4, battery_percent),
+       battery_voltage = COALESCE($5, battery_voltage),
        last_seen = NOW()
      WHERE id = $1
-     RETURNING id, name, last_ip, is_online, last_seen, created_at`,
-    [normalizedRobotId, isOnline, lastIp]
+     RETURNING id, name, last_ip, is_online, battery_percent, battery_voltage, last_seen, created_at`,
+    [normalizedRobotId, isOnline, lastIp, batteryPercent, batteryVoltage]
   );
 
   if (rows[0]) {
@@ -191,13 +207,13 @@ async function registerRobot(name, id = null) {
         `INSERT INTO robots (id, name)
          VALUES ($1, $2)
          ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name
-         RETURNING id, name, last_ip, is_online, last_seen, created_at`,
+         RETURNING id, name, last_ip, is_online, battery_percent, battery_voltage, last_seen, created_at`,
         [normalizedRobotId, name.trim()]
       )
     : await pool.query(
         `INSERT INTO robots (name)
          VALUES ($1)
-         RETURNING id, name, last_ip, is_online, last_seen, created_at`,
+         RETURNING id, name, last_ip, is_online, battery_percent, battery_voltage, last_seen, created_at`,
         [name.trim()]
       );
 
@@ -217,6 +233,7 @@ async function deleteRobot(robotId) {
     throw new Error('Robot not found');
   }
 
+  robotBattery.delete(normalizedRobotId);
   const robotSocket = robotClients.get(normalizedRobotId);
   if (robotSocket) {
     robotSocket.close(1000, 'robot deleted');
@@ -352,7 +369,93 @@ function attachWebSocketServer(server) {
         case 'status': {
           if (role !== 'robot') throw new Error('Only robot clients can send status');
           touchRobot(robotId);
-          await markRobotOnline(robotId, message.is_online !== false, message.last_ip || null);
+          const hasPercentField = message.battery_percent !== undefined && message.battery_percent !== null;
+          const hasVoltageField = message.battery_voltage !== undefined && message.battery_voltage !== null;
+          const rawPercent = hasPercentField ? Number(message.battery_percent) : NaN;
+          const rawVoltage = hasVoltageField ? Number(message.battery_voltage) : NaN;
+
+          const prev = robotBattery.get(robotId) || {
+            samples: [],
+            battery_percent: null,
+            battery_voltage: null,
+            raw_battery_percent: null,
+            raw_battery_voltage: null,
+          };
+
+          if (Number.isFinite(rawPercent)) {
+            prev.raw_battery_percent = Math.round(rawPercent);
+          }
+          if (Number.isFinite(rawVoltage)) {
+            prev.raw_battery_voltage = Number(rawVoltage.toFixed(3));
+          }
+
+          let stablePercent = null;
+          let stableVoltage = null;
+
+          const isPlausibleReading = Number.isFinite(rawPercent)
+            && rawPercent > 0
+            && rawPercent <= 100
+            && (!Number.isFinite(rawVoltage) || (rawVoltage >= 5.0 && rawVoltage <= 9.5));
+
+          if (isPlausibleReading) {
+            const clampedPct = Math.max(1, Math.min(100, Math.round(rawPercent)));
+            prev.samples.push({
+              pct: clampedPct,
+              v: Number.isFinite(rawVoltage) ? rawVoltage : null,
+            });
+            if (prev.samples.length > 5) {
+              prev.samples.shift();
+            }
+
+            // En az 2 tutarlı örnek geldiğinde medyan + EMA ile stabilize et
+            if (prev.samples.length >= 2) {
+              const sortedPct = prev.samples.map((s) => s.pct).sort((a, b) => a - b);
+              const medianPct = sortedPct[Math.floor(sortedPct.length / 2)];
+              const spread = sortedPct[sortedPct.length - 1] - sortedPct[0];
+
+              // Eğer son örnekler aşırı dalgalanıyorsa (>35% sıçrama) henüz stabil kabul etme
+              if (spread <= 35) {
+                const smoothedPct = prev.battery_percent !== null
+                  ? Math.round(prev.battery_percent * 0.7 + medianPct * 0.3)
+                  : medianPct;
+                // Küçük %1 oynamaları bastır (histerezis)
+                if (prev.battery_percent !== null && Math.abs(smoothedPct - prev.battery_percent) < 2) {
+                  stablePercent = prev.battery_percent;
+                } else {
+                  stablePercent = smoothedPct;
+                }
+
+                const validVoltages = prev.samples.map((s) => s.v).filter((v) => v !== null).sort((a, b) => a - b);
+                if (validVoltages.length > 0) {
+                  const medianV = validVoltages[Math.floor(validVoltages.length / 2)];
+                  stableVoltage = prev.battery_voltage !== null
+                    ? Number((prev.battery_voltage * 0.7 + medianV * 0.3).toFixed(2))
+                    : Number(medianV.toFixed(2));
+                }
+              }
+            }
+          } else if (hasPercentField && rawPercent <= 0) {
+            // 0 veya geçersiz okuma geliyorsa geçmiş örnekleri sıfırla ve pil gösterme
+            prev.samples = [];
+            prev.battery_percent = null;
+            prev.battery_voltage = null;
+          }
+
+          if (stablePercent !== null) {
+            prev.battery_percent = stablePercent;
+          }
+          if (stableVoltage !== null) {
+            prev.battery_voltage = stableVoltage;
+          }
+          robotBattery.set(robotId, prev);
+
+          await markRobotOnline(
+            robotId,
+            message.is_online !== false,
+            message.last_ip || null,
+            prev.battery_percent,
+            prev.battery_voltage
+          );
           break;
         }
         case 'command_done': {
