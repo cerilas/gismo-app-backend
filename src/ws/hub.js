@@ -29,11 +29,13 @@ function normalizeRobot(row) {
   const liveBattery = robotBattery.get(robotId);
   const rawPercent = liveBattery ? liveBattery.battery_percent : row.battery_percent;
   const rawVoltage = liveBattery ? liveBattery.battery_voltage : row.battery_voltage;
-  const validPercent = rawPercent !== null && rawPercent !== undefined && Number(rawPercent) > 0
-    ? Number(rawPercent)
-    : null;
-  const validVoltage = rawVoltage !== null && rawVoltage !== undefined && Number(rawVoltage) >= 5.0
+  const validVoltage = rawVoltage !== null && rawVoltage !== undefined && Number(rawVoltage) >= 4.5 && Number(rawVoltage) <= 9.5
     ? Number(rawVoltage)
+    : null;
+  const validPercent = rawPercent !== null && rawPercent !== undefined
+    && Number(rawPercent) >= 0 && Number(rawPercent) <= 100
+    && (Number(rawPercent) > 0 || validVoltage !== null)
+    ? Number(rawPercent)
     : null;
   return {
     id: robotId,
@@ -393,16 +395,17 @@ function attachWebSocketServer(server) {
           let stablePercent = null;
           let stableVoltage = null;
 
+          const hasValidVoltage = Number.isFinite(rawVoltage) && rawVoltage >= 4.5 && rawVoltage <= 9.5;
           const isPlausibleReading = Number.isFinite(rawPercent)
-            && rawPercent > 0
+            && rawPercent >= 0
             && rawPercent <= 100
-            && (!Number.isFinite(rawVoltage) || (rawVoltage >= 5.0 && rawVoltage <= 9.5));
+            && (hasValidVoltage || (! hasVoltageField && rawPercent > 0));
 
           if (isPlausibleReading) {
-            const clampedPct = Math.max(1, Math.min(100, Math.round(rawPercent)));
+            const clampedPct = Math.max(0, Math.min(100, Math.round(rawPercent)));
             prev.samples.push({
               pct: clampedPct,
-              v: Number.isFinite(rawVoltage) ? rawVoltage : null,
+              v: hasValidVoltage ? rawVoltage : null,
             });
             if (prev.samples.length > 5) {
               prev.samples.shift();
@@ -433,8 +436,8 @@ function attachWebSocketServer(server) {
                   : Number(medianV.toFixed(2));
               }
             }
-          } else if (hasPercentField && rawPercent <= 0) {
-            // 0 veya geçersiz okuma geliyorsa geçmiş örnekleri sıfırla ve pil gösterme
+          } else if (hasVoltageField && rawVoltage < 4.5) {
+            // Sensör bağlı değilse veya 0V geliyorsa geçmiş örnekleri sıfırla ve pil gösterme
             prev.samples = [];
             prev.ema_percent = null;
             prev.battery_percent = null;
