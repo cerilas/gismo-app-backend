@@ -376,6 +376,7 @@ function attachWebSocketServer(server) {
 
           const prev = robotBattery.get(robotId) || {
             samples: [],
+            ema_percent: null,
             battery_percent: null,
             battery_voltage: null,
             raw_battery_percent: null,
@@ -407,36 +408,35 @@ function attachWebSocketServer(server) {
               prev.samples.shift();
             }
 
-            // En az 2 tutarlı örnek geldiğinde medyan + EMA ile stabilize et
-            if (prev.samples.length >= 2) {
-              const sortedPct = prev.samples.map((s) => s.pct).sort((a, b) => a - b);
-              const medianPct = sortedPct[Math.floor(sortedPct.length / 2)];
-              const spread = sortedPct[sortedPct.length - 1] - sortedPct[0];
+            const sortedPct = prev.samples.map((s) => s.pct).sort((a, b) => a - b);
+            const medianPct = sortedPct[Math.floor(sortedPct.length / 2)];
+            const spread = sortedPct[sortedPct.length - 1] - sortedPct[0];
 
-              // Eğer son örnekler aşırı dalgalanıyorsa (>35% sıçrama) henüz stabil kabul etme
-              if (spread <= 35) {
-                const smoothedPct = prev.battery_percent !== null
-                  ? Math.round(prev.battery_percent * 0.7 + medianPct * 0.3)
-                  : medianPct;
-                // Küçük %1 oynamaları bastır (histerezis)
-                if (prev.battery_percent !== null && Math.abs(smoothedPct - prev.battery_percent) < 2) {
-                  stablePercent = prev.battery_percent;
-                } else {
-                  stablePercent = smoothedPct;
-                }
+            // Eğer son örnekler aşırı dalgalanıyorsa (>35% sıçrama) henüz stabil kabul etme
+            if (spread <= 35) {
+              prev.ema_percent = prev.ema_percent !== null
+                ? prev.ema_percent * 0.65 + medianPct * 0.35
+                : medianPct;
+              const roundedEma = Math.round(prev.ema_percent);
+              // Küçük dalgalanmaları bastır (histerezis)
+              if (prev.battery_percent !== null && Math.abs(prev.ema_percent - prev.battery_percent) < 1.4) {
+                stablePercent = prev.battery_percent;
+              } else {
+                stablePercent = roundedEma;
+              }
 
-                const validVoltages = prev.samples.map((s) => s.v).filter((v) => v !== null).sort((a, b) => a - b);
-                if (validVoltages.length > 0) {
-                  const medianV = validVoltages[Math.floor(validVoltages.length / 2)];
-                  stableVoltage = prev.battery_voltage !== null
-                    ? Number((prev.battery_voltage * 0.7 + medianV * 0.3).toFixed(2))
-                    : Number(medianV.toFixed(2));
-                }
+              const validVoltages = prev.samples.map((s) => s.v).filter((v) => v !== null).sort((a, b) => a - b);
+              if (validVoltages.length > 0) {
+                const medianV = validVoltages[Math.floor(validVoltages.length / 2)];
+                stableVoltage = prev.battery_voltage !== null
+                  ? Number((prev.battery_voltage * 0.65 + medianV * 0.35).toFixed(2))
+                  : Number(medianV.toFixed(2));
               }
             }
           } else if (hasPercentField && rawPercent <= 0) {
             // 0 veya geçersiz okuma geliyorsa geçmiş örnekleri sıfırla ve pil gösterme
             prev.samples = [];
+            prev.ema_percent = null;
             prev.battery_percent = null;
             prev.battery_voltage = null;
           }
